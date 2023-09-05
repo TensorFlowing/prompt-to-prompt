@@ -1,13 +1,20 @@
+# Note Abel
+# diffusers==0.10.0 is essential for this code to run
+
+
+
+
 # %%
 from typing import Union, Tuple, List, Callable, Dict, Optional
 import torch
 import torch.nn.functional as nnf
 from diffusers import DiffusionPipeline
 import numpy as np
-from IPython.display import display
+# from IPython.display import display
+import imageio 
 from PIL import Image
 import abc
-import ptp_utils
+import ptp_utils_abel as ptp_utils
 import seq_aligner
 
 # %%
@@ -20,7 +27,6 @@ MAX_NUM_WORDS = 77
 ldm = DiffusionPipeline.from_pretrained(model_id).to(device)
 tokenizer = ldm.tokenizer
 
-# %% [markdown]
 # ## Prompt-to-Prompt Attnetion Controllers
 # Our main logic is implemented in the `forward` call in an `AttentionControl` object.
 # The forward is called in each attention layer of the diffusion model and it can modify the input attnetion weights `attn`.
@@ -238,6 +244,7 @@ def get_equalizer(text: str, word_select: Union[int, Tuple[int, ...]], values: U
 def aggregate_attention(attention_store: AttentionStore, res: int, from_where: List[str], is_cross: bool, select: int):
     out = []
     attention_maps = attention_store.get_average_attention()
+    print("attention_maps", attention_maps)
     num_pixels = res ** 2
     for location in from_where:
         for item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]: 
@@ -249,9 +256,13 @@ def aggregate_attention(attention_store: AttentionStore, res: int, from_where: L
     return out.cpu()
 
 
-def show_cross_attention(attention_store: AttentionStore, res: int, from_where: List[str], select: int = 0):
+def show_cross_attention(path_save, attention_store: AttentionStore, res: int, from_where: List[str], select: int = 0):
     tokens = tokenizer.encode(prompts[select])
+    print("len(tokens): ", len(tokens))
     decoder = tokenizer.decode
+    print("decoder: ", decoder) # bound method PreTrainedTokenizerBase.decode of BertTokenizer...
+
+    print("Before aggregate_attention, len(attention_store.get_average_attention()): ", len(attention_store.get_average_attention()))
     attention_maps = aggregate_attention(attention_store, res, from_where, True, select) # setting is_cross = True
     images = []
     for i in range(len(tokens)):
@@ -262,10 +273,10 @@ def show_cross_attention(attention_store: AttentionStore, res: int, from_where: 
         image = np.array(Image.fromarray(image).resize((256, 256)))
         image = ptp_utils.text_under_image(image, decoder(int(tokens[i])))
         images.append(image)
-    ptp_utils.view_images(np.stack(images, axis=0))
+    ptp_utils.view_images(path_save, np.stack(images, axis=0))
     
 
-def show_self_attention_comp(attention_store: AttentionStore, res: int, from_where: List[str],
+def show_self_attention_comp(path_save, attention_store: AttentionStore, res: int, from_where: List[str],
                         max_com=10, select: int = 0):
     attention_maps = aggregate_attention(attention_store, res, from_where, False, select).numpy().reshape((res ** 2, res ** 2))
     u, s, vh = np.linalg.svd(attention_maps - np.mean(attention_maps, axis=1, keepdims=True))
@@ -278,7 +289,7 @@ def show_self_attention_comp(attention_store: AttentionStore, res: int, from_whe
         image = Image.fromarray(image).resize((256, 256))
         image = np.array(image)
         images.append(image)
-    ptp_utils.view_images(np.concatenate(images, axis=1))
+    ptp_utils.view_images(path_save, np.concatenate(images, axis=1))
 
 # %%
 def sort_by_eq(eq):
@@ -303,7 +314,7 @@ def sort_by_eq(eq):
     return inner_
 
 
-def run_and_display(prompts, controller, latent=None, run_baseline=True, callback:Optional[Callable[[np.ndarray], np.ndarray]] = None, generator=None):
+def run_and_display(path_save, prompts, controller, latent=None, run_baseline=True, callback:Optional[Callable[[np.ndarray], np.ndarray]] = None, generator=None):
     if run_baseline:
         print("w.o. prompt-to-prompt")
         # run an extra round to get the baseline (no prompt-to-prompt)
@@ -312,178 +323,182 @@ def run_and_display(prompts, controller, latent=None, run_baseline=True, callbac
     images, x_t = ptp_utils.text2image_ldm(ldm, prompts, controller, latent=latent, num_inference_steps=NUM_DIFFUSION_STEPS, guidance_scale=GUIDANCE_SCALE, generator=generator)
     if callback is not None:
         images = callback(images)
-    ptp_utils.view_images(images)
+    ptp_utils.view_images(path_save, images)
     return images, x_t
 
-# Cross-Attention Visualization
-g_cpu = torch.Generator().manual_seed(888)
-prompts = ["A painting of a squirrel eating a burger"]
-controller = AttentionStore()
-images, x_t = run_and_display(prompts, controller, run_baseline=False, generator=g_cpu)
-show_cross_attention(controller, res=16, from_where=["up", "down"])
+if __name__ == "__main__":
 
-# %% [markdown]
-# ## Replacement edit with Prompt-to-Prompt
+    # Cross-Attention Visualization
+    g_cpu = torch.Generator().manual_seed(888)
+    prompts = ["A painting of a squirrel eating a burger"]
+    controller = AttentionStore()
+    path_save = "results/generation_result.png"
+    images, x_t = run_and_display(path_save, prompts, controller, run_baseline=False, generator=g_cpu)
+    path_save = "results/cross_attention_visualization.png"
+    show_cross_attention(path_save, controller, res=16, from_where=["up", "down"])
 
-# %%
-prompts = ["A painting of a squirrel eating a burger",
-           "A painting of a lion eating a burger",
-           "A painting of a cat eating a burger",
-           "A painting of a deer eating a burger",
-          ]
-controller = AttentionReplace(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.2)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=True)
+# # %% [markdown]
+# # ## Replacement edit with Prompt-to-Prompt
 
-# %% [markdown]
-# ### Modify Cross-Attention injection #steps for specific words
-# Next, we can reduce the restriction on our lion by reducing the number of cross-attention injection with respect to the replacement words.
+# # %%
+# prompts = ["A painting of a squirrel eating a burger",
+#            "A painting of a lion eating a burger",
+#            "A painting of a cat eating a burger",
+#            "A painting of a deer eating a burger",
+#           ]
+# controller = AttentionReplace(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.2)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=True)
 
-# %%
-prompts = ["A painting of a squirrel eating a burger",
-           "A painting of a lion eating a burger",
-           "A painting of a cat eating a burger",
-           "A painting of a deer eating a burger",
-          ]
-controller = AttentionReplace(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "lion": .4, "cat": .3, "deer": .2},
-                              self_replace_steps=0.2)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+# # %% [markdown]
+# # ### Modify Cross-Attention injection #steps for specific words
+# # Next, we can reduce the restriction on our lion by reducing the number of cross-attention injection with respect to the replacement words.
 
-# %% [markdown]
-# ### Local Edit
-# Lastly, if we want to only replace the burger, we can apply a local edit with respect to to the replacement words.
+# # %%
+# prompts = ["A painting of a squirrel eating a burger",
+#            "A painting of a lion eating a burger",
+#            "A painting of a cat eating a burger",
+#            "A painting of a deer eating a burger",
+#           ]
+# controller = AttentionReplace(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "lion": .4, "cat": .3, "deer": .2},
+#                               self_replace_steps=0.2)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
 
-# %%
-prompts = ["A painting of a squirrel eating a burger",
-           "A painting of a squirrel eating a lasagne",
-           "A painting of a squirrel eating a pretzel",
-           "A painting of a squirrel eating a sushi",
-          ]
+# # %% [markdown]
+# # ### Local Edit
+# # Lastly, if we want to only replace the burger, we can apply a local edit with respect to to the replacement words.
 
-controller = AttentionReplace(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "lasagne": .2, "pretzel": .2, "sushi": .2},
-                              self_replace_steps=0.2, local_blend=None)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+# # %%
+# prompts = ["A painting of a squirrel eating a burger",
+#            "A painting of a squirrel eating a lasagne",
+#            "A painting of a squirrel eating a pretzel",
+#            "A painting of a squirrel eating a sushi",
+#           ]
 
-# %%
-prompts = ["A painting of a squirrel eating a burger",
-           "A painting of a squirrel eating a lasagne",
-           "A painting of a squirrel eating a pretzel",
-           "A painting of a squirrel eating a sushi",
-          ]
+# controller = AttentionReplace(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "lasagne": .2, "pretzel": .2, "sushi": .2},
+#                               self_replace_steps=0.2, local_blend=None)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
 
-lb = LocalBlend(prompts, ("burger", "lasagne", "pretzel", "sushi"))
-controller = AttentionReplace(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "lasagne": .2, "pretzel": .2, "sushi": .2},
-                              self_replace_steps=0.2, local_blend=lb)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+# # %%
+# prompts = ["A painting of a squirrel eating a burger",
+#            "A painting of a squirrel eating a lasagne",
+#            "A painting of a squirrel eating a pretzel",
+#            "A painting of a squirrel eating a sushi",
+#           ]
 
-# %% [markdown]
-# ## Refinement edit
+# lb = LocalBlend(prompts, ("burger", "lasagne", "pretzel", "sushi"))
+# controller = AttentionReplace(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "lasagne": .2, "pretzel": .2, "sushi": .2},
+#                               self_replace_steps=0.2, local_blend=lb)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
 
-# %%
-prompts = ["A painting of a squirrel eating a burger",
-           "A watercolor painting of a squirrel eating a burger",
-           "A dark painting of a squirrel eating a burger",
-           "A realitic photo of a squirrel eating a burger",
-          ]
+# # %% [markdown]
+# # ## Refinement edit
 
-controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.2)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=True)
+# # %%
+# prompts = ["A painting of a squirrel eating a burger",
+#            "A watercolor painting of a squirrel eating a burger",
+#            "A dark painting of a squirrel eating a burger",
+#            "A realitic photo of a squirrel eating a burger",
+#           ]
 
-# %%
-prompts = ["A river between mountains",
-           "A river between mountains at autumn",
-           "A river between mountains at winter",
-           "A river between mountains at sunset",
-          ]
+# controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.2)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=True)
 
-controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.4)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=True)
+# # %%
+# prompts = ["A river between mountains",
+#            "A river between mountains at autumn",
+#            "A river between mountains at winter",
+#            "A river between mountains at sunset",
+#           ]
 
-# %%
-prompts = ["A car on a bridge",
-           "A muscle car on a bridge",
-           "A futuristic car on a bridge",
-           "A retro car on a bridge",] 
+# controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.4)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=True)
 
-
-lb = LocalBlend(prompts, ("car", ("muscle", "car"), ("futuristic", "car"), ("retro", "car")))
-controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "car": .2},
-                             self_replace_steps=.4, local_blend=lb)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=True)
+# # %%
+# prompts = ["A car on a bridge",
+#            "A muscle car on a bridge",
+#            "A futuristic car on a bridge",
+#            "A retro car on a bridge",] 
 
 
-# %% [markdown]
-# ## Attention Re-Weighting
-
-# %%
-prompts = ["A photo of a tree branch at blossom"] * 4
-equalizer = get_equalizer(prompts[0], word_select=("blossom",), values=(.5, .0, -.5))
-controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=1., self_replace_steps=.2, equalizer=equalizer)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+# lb = LocalBlend(prompts, ("car", ("muscle", "car"), ("futuristic", "car"), ("retro", "car")))
+# controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "car": .2},
+#                              self_replace_steps=.4, local_blend=lb)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=True)
 
 
-# %%
-prompts = ["A photo of a poppy field at night"] * 4
-equalizer = get_equalizer(prompts[0], word_select=("night",), values=(.5, 0,  -.5))
-controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=1., self_replace_steps=.2, equalizer=equalizer)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+# # %% [markdown]
+# # ## Attention Re-Weighting
+
+# # %%
+# prompts = ["A photo of a tree branch at blossom"] * 4
+# equalizer = get_equalizer(prompts[0], word_select=("blossom",), values=(.5, .0, -.5))
+# controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=1., self_replace_steps=.2, equalizer=equalizer)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
 
 
-# %% [markdown]
-# ### Edit Composition
-# It might be useful to use Attention Re-Weighting with a previous edit method.
-
-# %%
-prompts = ["cake",
-           "birthday cake"] 
+# # %%
+# prompts = ["A photo of a poppy field at night"] * 4
+# equalizer = get_equalizer(prompts[0], word_select=("night",), values=(.5, 0,  -.5))
+# controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=1., self_replace_steps=.2, equalizer=equalizer)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
 
 
-lb = LocalBlend(prompts, ("cake", ("birthday", "cake")))
-controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.4, local_blend=lb)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+# # %% [markdown]
+# # ### Edit Composition
+# # It might be useful to use Attention Re-Weighting with a previous edit method.
 
-# %% [markdown]
-# result with more attetnion to `"birthday"`
-
-# %%
-prompts = ["cake",
-           "birthday cake"] 
+# # %%
+# prompts = ["cake",
+#            "birthday cake"] 
 
 
-lb = LocalBlend(prompts, ("cake", ("birthday", "cake")))
-controller_a = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.4, local_blend=lb)
+# lb = LocalBlend(prompts, ("cake", ("birthday", "cake")))
+# controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.4, local_blend=lb)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
 
-## pay 5 times more attention to the word "birthday"
-equalizer = get_equalizer(prompts[1], ("birthday"), (5,))
-controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.4, equalizer=equalizer, local_blend=lb, controller=controller_a)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+# # %% [markdown]
+# # result with more attetnion to `"birthday"`
 
-# %%
-prompts = ["A car on a bridge",
-           "A cabriolet car on a bridge"]
-
-
-lb = LocalBlend(prompts, ("car", ("cabriolet", "car")))
-controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "car": .2},
-                             self_replace_steps=.2, local_blend=lb)
-
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
-
-# %% [markdown]
-# result with more attetnion to `"cabriolet"`
-
-# %%
-prompts = ["A car on a bridge",
-           "A cabriolet car on a bridge"]
+# # %%
+# prompts = ["cake",
+#            "birthday cake"] 
 
 
-lb = LocalBlend(prompts, ("car", ("cabriolet", "car")))
-controller_a = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "car": .2}, self_replace_steps=.2, local_blend=lb)
+# lb = LocalBlend(prompts, ("cake", ("birthday", "cake")))
+# controller_a = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.4, local_blend=lb)
 
-## pay 4 times more attention to the word "cabriolet"
-equalizer = get_equalizer(prompts[1], ("cabriolet"), (4,))
-controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "car": .2},
-                               self_replace_steps=.2, equalizer=equalizer, local_blend=lb, controller=controller_a)
-_ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+# ## pay 5 times more attention to the word "birthday"
+# equalizer = get_equalizer(prompts[1], ("birthday"), (5,))
+# controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps=.8, self_replace_steps=.4, equalizer=equalizer, local_blend=lb, controller=controller_a)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+
+# # %%
+# prompts = ["A car on a bridge",
+#            "A cabriolet car on a bridge"]
+
+
+# lb = LocalBlend(prompts, ("car", ("cabriolet", "car")))
+# controller = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "car": .2},
+#                              self_replace_steps=.2, local_blend=lb)
+
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
+
+# # %% [markdown]
+# # result with more attetnion to `"cabriolet"`
+
+# # %%
+# prompts = ["A car on a bridge",
+#            "A cabriolet car on a bridge"]
+
+
+# lb = LocalBlend(prompts, ("car", ("cabriolet", "car")))
+# controller_a = AttentionRefine(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "car": .2}, self_replace_steps=.2, local_blend=lb)
+
+# ## pay 4 times more attention to the word "cabriolet"
+# equalizer = get_equalizer(prompts[1], ("cabriolet"), (4,))
+# controller = AttentionReweight(prompts, NUM_DIFFUSION_STEPS, cross_replace_steps={"default_": 1., "car": .2},
+#                                self_replace_steps=.2, equalizer=equalizer, local_blend=lb, controller=controller_a)
+# _ = run_and_display(prompts, controller, latent=x_t, run_baseline=False)
 
 # %%
 

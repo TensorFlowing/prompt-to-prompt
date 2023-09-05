@@ -17,8 +17,9 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 from typing import Optional, Union, Tuple, List, Callable, Dict
-# from IPython.display import display
-from tqdm.notebook import tqdm
+from IPython.display import display
+# from tqdm.notebook import tqdm
+from tqdm import tqdm
 
 
 def text_under_image(image: np.ndarray, text: str, text_color: Tuple[int, int, int] = (0, 0, 0)):
@@ -58,7 +59,7 @@ def view_images(images, num_rows=1, offset_ratio=0.02):
                 i * num_cols + j]
 
     pil_img = Image.fromarray(image_)
-    # display(pil_img)
+    display(pil_img)
 
 
 def diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource=False):
@@ -218,7 +219,6 @@ def register_attention_control(model, controller):
     if controller is None:
         controller = DummyController()
 
-    # Update the CrossAttention layers' forward function with ca_forward
     def register_recr(net_, count, place_in_unet):
         if net_.__class__.__name__ == 'CrossAttention':
             net_.forward = ca_forward(net_, place_in_unet)
